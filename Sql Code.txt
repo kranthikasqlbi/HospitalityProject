@@ -1,0 +1,259 @@
+-- Create DataBase
+CREATE DATABASE HOTEL_DB;
+
+-- ROLE: ACCOUNTADMIN
+--WAREHOSUE: COMPUTE_WH
+-- SCHEMA: PUBLIC ONLY 
+
+-- Create File Format
+CREATE OR REPLACE FILE FORMAT FF_CSV
+    TYPE = 'CSV'
+    FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+    SKIP_HEADER = 1
+    NULL_IF = ('NULL', 'null', '')
+
+
+   -- Create Stage
+CREATE OR REPLACE STAGE STG_HOTEL_BOOKINGS
+FILE_FORMAT =FF_CSV;
+
+
+
+---BRONZE Layer
+
+-- Create Table BRONZE_HOTEL_BOOKING
+-- DATATYPES SIMPLY GIVE AS STRING, WE WILL ASSING APPRORIATE ONES IN SILVER_TABLE
+CREATE TABLE BRONZE_HOTEL_BOOKING (
+    booking_id STRING,
+    hotel_id STRING,
+    hotel_city STRING,
+    customer_id STRING,
+    customer_name STRING,
+    customer_email STRING,
+    check_in_date STRING,
+    check_out_date STRING,
+    room_type STRING,
+    num_guests STRING,
+    total_amount STRING,
+    currency STRING,
+    booking_status STRING
+);
+
+
+COPY INTO BRONZE_HOTEL_BOOKING
+FROM @STG_HOTEL_BOOKINGS
+FILE_FORMAT = (FORMAT_NAME = FF_CSV)
+ON_ERROR = 'CONTINUE'; 
+
+SELECT * FROM BRONZE_HOTEL_BOOKING LIMIT 50;
+
+
+--SILVER Layer
+
+
+
+-- Create Table SILVER_HOTEL_BOOKINGS
+
+CREATE TABLE SILVER_HOTEL_BOOKINGS (
+    booking_id VARCHAR,
+    hotel_id VARCHAR,
+    hotel_city VARCHAR,
+    customer_id VARCHAR,
+    customer_name VARCHAR,
+    customer_email VARCHAR,
+    check_in_date DATE,
+    check_out_date DATE,
+    room_type VARCHAR,
+    num_guests INTEGER,
+    total_amount FLOAT,
+    currency VARCHAR,
+    booking_status VARCHAR
+);
+
+--CHECKS
+
+--1)  SEE ANY INVALID CUSTOMER DETAILS 
+-- Checking for errors
+--Find Invalid or Missing Customer Email Addresses
+
+
+SELECT customer_email
+FROM BRONZE_HOTEL_BOOKING
+WHERE NOT (customer_email LIKE '%@%.%')
+--This selects emails that do not match the basic email pattern (KRANTHI@GMAIL.COM)
+    OR customer_email IS NULL
+-- THIS SELECT NULLS IN TABLE
+
+
+-- 2) Find Records with Negative Total Amount Values
+
+SELECT total_amount
+FROM BRONZE_HOTEL_BOOKING
+WHERE TRY_TO_NUMBER(total_amount) < 0;
+
+--TRY_TO_NUMBER() safely converts a value to a number and returns NULL instead of an error if the conversion fails.
+
+--3) Find Records Where Check-Out Date Is Earlier Than Check-In Date
+
+SELECT check_in_date, check_out_date
+FROM BRONZE_HOTEL_BOOKING
+WHERE TRY_TO_DATE(check_out_date) < TRY_TO_DATE(check_in_date);
+
+--4) Retrieve All Unique Booking Status Values
+--Identify Unique Booking Status Values to Detect Inconsistent Spellings
+--Identify Unique Booking Status Values to Detect Inconsistent Spellings
+
+SELECT DISTINCT booking_status
+FROM BRONZE_HOTEL_BOOKING;
+
+
+
+-----------------------------------------------------------------------------------
+------------------- Iserting Cleaned data to Silver layer -------------------------
+-----------------------------------------------------------------------------------
+
+
+
+
+INSERT INTO SILVER_HOTEL_BOOKINGS
+SELECT
+    booking_id,
+    hotel_id,
+    INITCAP(TRIM(hotel_city)) AS hotel_city,
+    customer_id,
+    INITCAP(TRIM(customer_name)) AS customer_name,
+    -- INITCAP → converts to proper case. (HYDERrabad -> Hyderabad)
+    --Trim -> empty spaces removes
+    CASE
+        WHEN customer_email LIKE '%@%.%' THEN LOWER(TRIM(customer_email))
+        ELSE NULL
+    END AS customer_email,
+    --check emails looks valid or else it become null 
+    TRY_TO_DATE(NULLIF(check_in_date, '')) AS check_in_date,
+    TRY_TO_DATE(NULLIF(check_out_date, '')) AS check_out_date,
+    room_type,
+    num_guests,
+    ABS(TRY_TO_NUMBER(total_amount)) AS total_amount,
+    --ABS :ABS makes negative values positive.
+    currency,
+    CASE
+        WHEN LOWER(booking_status) in ('confirmeeed', 'confirmd') THEN 'Confirmed'
+        ELSE booking_status
+    END AS booking_status
+    FROM BRONZE_HOTEL_BOOKING
+    WHERE
+        TRY_TO_DATE(check_in_date) IS NOT NULL
+        AND TRY_TO_DATE(check_out_date) IS NOT NULL
+        --Both above are not null and below should outdate>indate
+        AND TRY_TO_DATE(check_out_date) >= TRY_TO_DATE(check_in_date);
+
+        select * From silver_hotel_bookings
+
+-- Just Cross checking above queries (CHECKS for above Bronze, same checks for siliver too) 
+
+SELECT * FROM SILVER_HOTEL_BOOKINGS LIMIT 30;
+
+SELECT customer_email
+FROM silver_HOTEL_BOOKINGs
+WHERE NOT (customer_email LIKE '%@%.%')
+
+SELECT total_amount
+FROM SILVER_HOTEL_BOOKINGS
+WHERE TRY_TO_NUMBER(total_amount) < 0;
+
+SELECT DISTINCT booking_status
+FROM SILVER_HOTEL_BOOKINGS;
+
+SELECT check_in_date, check_out_date
+FROM silver_HOTEL_BOOKINGs
+WHERE TRY_TO_DATE(check_out_date) < TRY_TO_DATE(check_in_date);
+
+
+---- BRONSE is Done ,Cleaning and basic trasnsformations)
+
+
+
+======================================================================
+--------------------------- GOLD Layer --------------------------
+======================================================================
+
+--1) Open the Busines Requirement Document(BRD) -- Hotel Analytics Dashboard
+
+
+-- Create Gold Tables
+CREATE TABLE GOLD_AGG_DAILY_BOOKING AS
+SELECT
+    check_in_date AS date,
+    COUNT(*) AS total_booking,
+    SUM(total_amount) AS total_revenue
+FROM SILVER_HOTEL_BOOKINGS
+GROUP BY check_in_date
+ORDER BY date;
+
+CREATE TABLE GOLD_AGG_HOTEL_CITY_SALES AS
+SELECT
+    hotel_city,
+    SUM(total_amount) AS total_revenue
+FROM SILVER_HOTEL_BOOKINGS
+GROUP BY hotel_city
+ORDER BY total_revenue DESC;
+
+CREATE TABLE GOLD_BOOKING_CLEAN AS
+SELECT
+    booking_id,
+    hotel_id,
+    hotel_city,
+    customer_id,
+    customer_name,
+    customer_email,
+    check_in_date,
+    check_out_date,
+    room_type,
+    num_guests,
+    total_amount,              
+    currency,
+    booking_status
+FROM SILVER_HOTEL_BOOKINGS;
+
+SELECT * FROM GOLD_AGG_DAILY_BOOKING LIMIT 30;
+
+SELECT * FROM GOLD_AGG_HOTEL_CITY_SALES LIMIT 30;
+
+select * from gold_booking_clean;
+select * from silver_hotel_bookings
+select * from bronze_hotel_booking;
+
+
+
+---Dashboard Queries /Dashbaord is depricated from jun2026 in snowflake
+
+SELECT date,total_booking FROM GOLD_AGG_DAILY_BOOKING ORDER BY date;
+
+SELECT date,total_revenue FROM GOLD_AGG_DAILY_BOOKING ORDER BY date;
+
+SELECT HOTEL_CITY,TOTAL_REVENUE FROM GOLD_AGG_HOTEL_CITY_SALES WHERE TOTAL_REVENUE IS NOT NULL ORDER BY TOTAL_REVENUE DESC LIMIT 5;
+
+SELECT DATE,TOTAL_BOOKING FROM GOLD_AGG_DAILY_BOOKING ORDER BY DATE;
+
+SELECT ROOM_TYPE, COUNT(*) AS TOTAL_BOOKINGS FROM GOLD_BOOKING_CLEAN GROUP BY ROOM_TYPE ORDER BY TOTAL_BOOKINGS DESC;
+
+SELECT BOOKING_sTATUS, COUNT(*) AS TOTAL FROM GOLD_BOOKING_CLEAN GROUP BY BOOKING_sTATUS;
+
+----------------------------KPI-----------------
+
+SELECT SUM(TOTAL_AMOUNT) AS TOTAL_rEVENUE FROM GOLD_BOOKING_CLEAN;
+
+SELECT COUNT(*) AS TOTAL_BOOKINGS FROM GOLD_BOOKING_CLEAN;
+
+SELECT AVG(TOTAL_AMOUNT) AS AVG_BOOKINGS FROM GOLD_BOOKING_CLEAN;
+
+SELECT SUM(NUM_GUESTS) AS TOT_GUESTS FROM GOLD_BOOKING_CLEAN;
+
+
+TOTAL 5 AREA CHARTS AND 4 KPIS CHARTS PREPARED IN SNOWFLAKE DASHBOARD 
+
+
+
+
+
+
